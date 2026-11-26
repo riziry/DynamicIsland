@@ -22,7 +22,7 @@ namespace DynIsland
     static class AppInfo
     {
         // Keep in step with the release tag on GitHub (v1.0.0 -> "1.0.0").
-        public const string Version = "1.1.0";
+        public const string Version = "1.2.0";
         public const string Repo = "riziry/DynamicIsland";
         public const string UserAgent = "DynamicIsland/" + Version + " (Windows)";
     }
