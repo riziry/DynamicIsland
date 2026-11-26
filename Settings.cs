@@ -29,6 +29,7 @@ namespace DynIsland
         public int AnimMode = 2;               // 0 off, 1 light, 2 normal, 3 relaxed, 4 custom
         public double AnimCustom = 1.0;
         public bool Springy = true;
+        public bool ContentMotion = true;      // centre-out compact content, cascading rows when open
         public bool ExtraMotion = false;       // playing glow
         public bool Shadows = true;
         public int Renderer = 0;               // 0 GPU (DWM), 1 compatible (layered)
@@ -1102,6 +1103,7 @@ namespace DynIsland
                 Seg("Speed", "Scales every duration on the island.", new[] { "Off", "Light", "Normal", "Relaxed", "Custom" }, S.AnimMode, 68, i => { S.AnimMode = i; Rebuild(); }),
                 S.AnimMode == 4 ? Sld("Custom speed", "1× = Normal. Higher is slower.", 0.3, 2.0, 0.05, S.AnimCustom, v => v.ToString("0.00", K.EN) + "×", v => S.AnimCustom = v, 1.0) : null,
                 Tog("Springy", "A soft overshoot when the island changes shape and pages settle.", S.Springy, v => S.Springy = v),
+                Tog("Content motion", "Content glides out from the centre and rows cascade in as the island opens.", S.ContentMotion, v => S.ContentMotion = v),
                 Row("Try it", "Plays an event so you can feel the settings.", K.PillBtn("Play a sample event", Theme.AccentFill, Theme.OnAccent, 30, () => isl.SampleEvent()))));
             p.Children.Add(Header("Rendering"));
             p.Children.Add(Card(

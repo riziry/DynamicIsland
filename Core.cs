@@ -393,12 +393,15 @@ namespace DynIsland
             catch { }
             return null;
         }
-        // Crisp text: pixel-snapped layout, fixed hinting (animated hinting looks blurry).
+        // Text setup. ClearType windows (Settings, Wizard) keep pixel-snapped hinting. The island is a
+        // scaled grayscale surface: WPF's hinted grayscale glyphs get no vertical anti-aliasing, so
+        // curves and icons stair-step ("pixelated") at Scale > 1 and mid-morph. Animated hinting draws
+        // unhinted, fully smoothed glyphs at the real on-screen size, which reads like macOS text.
         public static void CrispText(FrameworkElement w, bool clearType)
         {
             w.UseLayoutRounding = true;
             TextOptions.SetTextFormattingMode(w, TextFormattingMode.Ideal);
-            TextOptions.SetTextHintingMode(w, TextHintingMode.Auto);   // fixed when still, smooth while animating
+            TextOptions.SetTextHintingMode(w, clearType ? TextHintingMode.Auto : TextHintingMode.Animated);
             TextOptions.SetTextRenderingMode(w, clearType ? TextRenderingMode.ClearType : TextRenderingMode.Grayscale);
         }
         public static readonly FontFamily ICO = new FontFamily("Segoe Fluent Icons, Segoe MDL2 Assets");
@@ -873,33 +876,6 @@ namespace DynIsland
                 var inF = K.Anim(1, 260, K.OutCubic); inF.BeginTime = up.BeginTime;
                 tt.BeginAnimation(TranslateTransform.YProperty, inA);
                 nw.BeginAnimation(UIElement.OpacityProperty, inF);
-            }
-        }
-    }
-
-    static class Motion
-    {
-        // Children of a panel slide up and fade in one after another.
-        public static void Stagger(Panel p, double fromY, int step)
-        {
-            if (p == null || K.AnimScale <= 0) return;
-            int i = 0;
-            foreach (UIElement c in p.Children)
-            {
-                if (c.Visibility != Visibility.Visible) continue;
-                var begin = TimeSpan.FromMilliseconds(K.Dur(60 + i * step));
-                bool own = c.RenderTransform == null || c.RenderTransform == Transform.Identity || c.RenderTransform is TranslateTransform;
-                if (own)
-                {
-                    var tt = new TranslateTransform(0, fromY);
-                    c.RenderTransform = tt;
-                    var a = K.Anim(0, 420, K.OutQuint); a.BeginTime = begin;
-                    tt.BeginAnimation(TranslateTransform.YProperty, a);
-                }
-                c.Opacity = 0;
-                var o = K.Anim(1, 300, K.OutCubic); o.BeginTime = begin;
-                c.BeginAnimation(UIElement.OpacityProperty, o);
-                i++;
             }
         }
     }

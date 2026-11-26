@@ -10,6 +10,6 @@ cd /d "%~dp0"
  /r:"%FW%\System.Runtime.WindowsRuntime.dll" /r:"%FW%\System.Runtime.dll" /r:"%FW%\System.Threading.Tasks.dll" ^
  /r:"%FW%\System.IO.dll" /r:"%FW%\System.Runtime.InteropServices.WindowsRuntime.dll" ^
  /r:"%WM%\Windows.Foundation.winmd" /r:"%WM%\Windows.Media.winmd" /r:"%WM%\Windows.Storage.winmd" /r:"%WM%\Windows.Devices.winmd" /r:"%WM%\Windows.UI.winmd" /r:"%WM%\Windows.ApplicationModel.winmd" ^
- Island.cs Pages.cs Core.cs Settings.cs Services.cs Ai.cs Launcher.cs Games.cs Notify.cs Installer.cs Wizard.cs EasterEgg.cs Updater.cs WinKeys.cs
+ Island.cs Pages.cs Core.cs Settings.cs Services.cs Ai.cs Launcher.cs Games.cs Notify.cs Installer.cs Wizard.cs EasterEgg.cs Updater.cs WinKeys.cs Motion.cs
 if errorlevel 1 (echo BUILD FAILED & exit /b 1)
 echo OK: DynamicIsland.exe

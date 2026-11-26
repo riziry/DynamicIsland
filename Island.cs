@@ -209,9 +209,9 @@ namespace DynIsland
             Theme.Changed += ApplyFill;
             Loaded += OnLoaded;
             Closed += delegate { Cleanup(); };
-            Deactivated += delegate { if (expanded && pinned && !CursorInIsland(6) && !dragOut && settingsWin == null) Collapse(); };
+            Deactivated += delegate { if (expanded && pinned && !aiPicking && !CursorInIsland(6) && !dragOut && settingsWin == null) Collapse(); };
             PreviewKeyDown += OnKey;
-            mouseHook.Down += p => { if (expanded && !dragOut && !PointInIsland(p, 4)) Collapse(); };
+            mouseHook.Down += p => { if (expanded && !aiPicking && !dragOut && !PointInIsland(p, 4)) Collapse(); };
         }
 
         static DispatcherTimer Timer(int ms, EventHandler tick)
@@ -618,6 +618,7 @@ namespace DynIsland
             a.Completed += delegate { if (curView != old) { old.Root.Visibility = Visibility.Collapsed; old.Root.Effect = null; OnViewHidden(old); } };
             old.Root.BeginAnimation(OpacityProperty, a);
             K.Pop(old.Pop, next.W * next.H < old.W * old.H ? 0.92 : 1.03, ms + 40, K.OutCubic);
+            if (!old.Top && old != vMini && old != vEmpty) Motion.EarsOut(old.Root, old.W);
         }
 
         void FadeIn(View v)
@@ -630,6 +631,9 @@ namespace DynIsland
             v.Pop.BeginAnimation(ScaleTransform.ScaleXProperty, null); v.Pop.BeginAnimation(ScaleTransform.ScaleYProperty, null);
             v.Pop.ScaleX = v.Pop.ScaleY = 0.96;
             K.Pop(v.Pop, 1, 420, K.OutQuint);
+            // compact content glides out from the centre with the pill (open pages cascade their
+            // rows from OnPageShown)
+            if (!v.Top && v != vMini && v != vEmpty) Motion.EarsIn(v.Root, v.W);
             OnViewShown(v);
         }
 
@@ -1332,6 +1336,7 @@ namespace DynIsland
                 {
                     case "toggle": Toggle(); break;
                     case "expand": Expand(arg, true); break;
+                    case "show": Expand(arg, false); break;   // open without taking keyboard focus (screenshots while the PC is in use)
                     case "collapse": Collapse(); break;
                     case "renderinfo": Log.Write("render tier=" + (RenderCapability.Tier >> 16) + " hwnd mode=" + (HwndSource.FromHwnd(hwnd).CompositionTarget.RenderMode) + " gpuRenderer=" + gpu + " layered=" + AllowsTransparency); break;
                     case "lkey": { Key lk; if (expandMode == "launcher" && arg != null && Enum.TryParse(arg, true, out lk)) LauncherKey(new KeyEventArgs(Keyboard.PrimaryDevice, PresentationSource.FromVisual(this), 0, lk) { RoutedEvent = Keyboard.KeyDownEvent }); } break;
@@ -1398,7 +1403,7 @@ namespace DynIsland
                         break;
                     case "todo": if (arg != null) { Store.Todos.Insert(0, new TodoItem { Text = string.Join(" ", a.Skip(1)), Created = DateTime.Now.Ticks }); Store.SaveTodos(); RefreshTodos(null); } break;
                     case "shelf": if (arg == "clear") ClearShelf(); else if (arg != null) { AddToShelf(a.Skip(1)); RefreshShelf(null); } break;
-                    case "ai": if (arg == "send" && a.Length > 2) { Expand("ai", true); aiInput.Text = string.Join(" ", a.Skip(2)); AiSend(); } else if (arg == "new") AiNewChat(); break;
+                    case "ai": if (arg == "send" && a.Length > 2) { Expand("ai", true); aiInput.Text = string.Join(" ", a.Skip(2)); AiSend(); } else if (arg == "new") AiNewChat(); else if (arg == "attach" && a.Length > 2) { Expand("ai", true); AiAttachFiles(a.Skip(2)); } else if (arg == "paste") { Expand("ai", true); Log.Write("ai paste -> " + AiPasteImage()); } break;
                     case "theme": if (arg != null) { S.Palette = arg; Store.Save(); ApplySettings(); } break;
                     case "set":
                         {
@@ -2159,15 +2164,25 @@ namespace DynIsland
             e.Effects = DragDropEffects.Copy;
             lastDragOver = DateTime.Now;
             if (expanded && expandMode == "pages" && CurrentPageKey() == "shelf") { ShelfDropGlow(true); return; }
+            if (AiDropTarget(e)) return;
             if (expanded) Collapse();
             if (cur == null || cur.Kind != "drop") Post(new IslandEvent { Kind = "drop", Key = "drop", Priority = Pri.Urgent - 1, Duration = 0 });
             dragWatch.Start();
+        }
+
+        // Photos dragged onto the open AI chat become attachments instead of shelf items.
+        bool AiDropTarget(DragEventArgs e)
+        {
+            if (!expanded || CurrentPageKey() != "ai") return false;
+            var files = e.Data.GetData(DataFormats.FileDrop) as string[];
+            return files != null && files.Any(AiService.IsImageFile);
         }
 
         void OnDrop(object s, DragEventArgs e)
         {
             e.Handled = true; dragWatch.Stop(); ShelfDropGlow(false);
             var files = e.Data.GetData(DataFormats.FileDrop) as string[];
+            if (files != null && AiDropTarget(e)) { AiAttachFiles(files); return; }
             if (cur != null && cur.Kind == "drop") { evTimer.Stop(); cur = null; }
             if (files == null) { ShowBase(); return; }
             var added = AddToShelf(files);

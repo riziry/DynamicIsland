@@ -601,7 +601,7 @@ namespace DynIsland
             if (root != null)
                 foreach (var c in root.Children.OfType<Panel>())
                     if (c.Visibility == Visibility.Visible && c.Children.Count > best.Children.Count && !(c is Canvas)) best = c;
-            Motion.Stagger(best, 12, 34);
+            Motion.Cascade(best, 12, 36, 60);
         }
 
         // Heavy page work (rebuilding lists, icons, process counts, AI header) never runs mid-slide:
@@ -1399,7 +1399,7 @@ namespace DynIsland
             Grid.SetRow(bar, 1);
             g.Children.Add(bar);
 
-            todoScroll = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Hidden, Margin = new Thickness(0, 6, 0, 2) };
+            todoScroll = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Hidden, Margin = new Thickness(0, 6, 0, 2) }; ScrollFade.Attach(todoScroll, 22, false);
             todoList = new StackPanel();
             todoScroll.Content = todoList;
             Grid.SetRow(todoScroll, 2);
@@ -1690,7 +1690,7 @@ namespace DynIsland
             head.Children.Add(titles); head.Children.Add(acts);
             page.Children.Add(head);
 
-            shelfScroll = new ScrollViewer { HorizontalScrollBarVisibility = ScrollBarVisibility.Hidden, VerticalScrollBarVisibility = ScrollBarVisibility.Disabled, Margin = new Thickness(0, 8, 0, 0) };
+            shelfScroll = new ScrollViewer { HorizontalScrollBarVisibility = ScrollBarVisibility.Hidden, VerticalScrollBarVisibility = ScrollBarVisibility.Disabled, Margin = new Thickness(0, 8, 0, 0) }; ScrollFade.Attach(shelfScroll, 26, true);
             shelfPanel = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 4, 0, 4) };
             shelfScroll.Content = shelfPanel;
             shelfScroll.PreviewMouseWheel += (s, e) => { e.Handled = true; shelfScroll.ScrollToHorizontalOffset(shelfScroll.HorizontalOffset - e.Delta * 0.6); };
@@ -1774,7 +1774,7 @@ namespace DynIsland
             {
                 double bytes = 0; int folders = 0;
                 foreach (var p in S.ShelfItems) { try { if (Directory.Exists(p)) folders++; else bytes += new FileInfo(p).Length; } catch { } }
-                shelfSub.Text = n == 0 ? "Temporary home for files" : K.Bytes(bytes) + (folders > 0 ? " · " + folders + (folders == 1 ? " folder" : " folders") : "");
+                shelfSub.Text = n == 0 ? "Empty" : K.Bytes(bytes) + (folders > 0 ? " · " + folders + (folders == 1 ? " folder" : " folders") : "");
                 shelfSub.Foreground = Theme.Text3;
             }
             keepGlyph.Foreground = S.ShelfKeepAfterDrag ? (Brush)Theme.Accent : Theme.Text2;
@@ -2110,6 +2110,8 @@ namespace DynIsland
         readonly Dictionary<string, Border> aiProvBtns = new Dictionary<string, Border>();
         ScrollViewer aiScroll; TextBox aiInput; Border aiWarn, aiEmptyIcon; Border aiStreamBubble; readonly StringBuilder aiStreamText = new StringBuilder();
         DispatcherTimer aiRenderTimer; bool aiRenderDirty; Border aiThinkingRow;
+        WrapPanel aiAttachStrip; readonly List<string> aiPending = new List<string>();
+        bool aiPicking;   // file dialog open: the island must not collapse under it
 
         Grid BuildAiPage()
         {
@@ -2148,13 +2150,8 @@ namespace DynIsland
             g.Children.Add(aiWarn);
 
             aiScroll = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Hidden, Margin = new Thickness(0, 6, 0, 8) };
-            // messages fade out under the header instead of being cut off hard
-            var fade = new LinearGradientBrush { StartPoint = new Point(0, 0), EndPoint = new Point(0, 1) };
-            fade.GradientStops.Add(new GradientStop(Color.FromArgb(0, 0, 0, 0), 0));
-            fade.GradientStops.Add(new GradientStop(Color.FromArgb(255, 0, 0, 0), 0.08));
-            fade.GradientStops.Add(new GradientStop(Color.FromArgb(255, 0, 0, 0), 1));
-            fade.Freeze();
-            aiScroll.OpacityMask = fade;
+            // messages fade out under the header (and above the input) instead of being cut off hard
+            ScrollFade.Attach(aiScroll, 28, false);
             aiList = new StackPanel { VerticalAlignment = VerticalAlignment.Bottom, Margin = new Thickness(0, 10, 0, 0) };
             aiScroll.Content = aiList;
             Grid.SetRow(aiScroll, 2);
@@ -2183,19 +2180,38 @@ namespace DynIsland
             aiBarBorder = new SolidColorBrush(Theme.A(Theme.Current.Text, 0.06));
             var bar = new Border { CornerRadius = new CornerRadius(20), Background = Theme.Raised, MinHeight = 40, BorderThickness = new Thickness(1), BorderBrush = aiBarBorder };
             var bg = new Grid();
+            bg.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             bg.ColumnDefinitions.Add(new ColumnDefinition());
             bg.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            bg.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            bg.RowDefinitions.Add(new RowDefinition());
+            // photos waiting to be sent: a row of thumbnails above the text, inside the bar
+            aiAttachStrip = new WrapPanel { Margin = new Thickness(8, 8, 8, 0), Visibility = Visibility.Collapsed };
+            Grid.SetColumnSpan(aiAttachStrip, 3);
+            bg.Children.Add(aiAttachStrip);
+            var attach = K.IconBtn("", 32, 13, Theme.Text2, AiPickImages);
+            attach.ToolTip = "Add photo (or paste with Ctrl+V)";
+            attach.Margin = new Thickness(3, 3, 0, 3); attach.VerticalAlignment = VerticalAlignment.Bottom;
+            Grid.SetRow(attach, 1);
+            bg.Children.Add(attach);
             aiInput = PinnedTextBox(new TextBox { TextWrapping = TextWrapping.Wrap, MaxHeight = 96, AcceptsReturn = false, VerticalAlignment = VerticalAlignment.Center });
             var field = K.Field(aiInput, "Ask anything…", 0, Brushes.Transparent);
             aiInput.PreviewKeyDown += (s, e) =>
             {
+                // Ctrl+V / Shift+Insert with a picture (or image files) on the clipboard attaches it
+                if ((e.Key == Key.V && (Keyboard.Modifiers & ModifierKeys.Control) != 0) || (e.Key == Key.Insert && (Keyboard.Modifiers & ModifierKeys.Shift) != 0))
+                {
+                    if (AiPasteImage()) e.Handled = true;
+                    return;
+                }
+                if (e.Key == Key.Back && aiInput.Text.Length == 0 && aiPending.Count > 0) { e.Handled = true; AiRemovePending(aiPending[aiPending.Count - 1]); return; }
                 if (e.Key != Key.Enter) return;
                 e.Handled = true;
                 if ((Keyboard.Modifiers & ModifierKeys.Shift) != 0) { int i = aiInput.CaretIndex; aiInput.Text = aiInput.Text.Insert(i, "\n"); aiInput.CaretIndex = i + 1; }
                 else AiSend();
             };
             aiSendBg = new SolidColorBrush(Theme.Current.Hover);
-            var send = new Border { Width = 32, Height = 32, CornerRadius = new CornerRadius(16), Background = aiSendBg, Margin = new Thickness(0, 0, 3, 3), Cursor = Cursors.Hand, VerticalAlignment = VerticalAlignment.Bottom };
+            var send = new Border { Width = 32, Height = 32, CornerRadius = new CornerRadius(16), Background = aiSendBg, Margin = new Thickness(0, 3, 3, 3), Cursor = Cursors.Hand, VerticalAlignment = VerticalAlignment.Bottom };
             aiSendGlyph = K.Glyph("", 13, Theme.Text3); send.Child = aiSendGlyph;
             K.Pressable(send, AiSend, false);
             // send lights up only when there's something to send (or a reply to stop); the bar outline
@@ -2203,7 +2219,8 @@ namespace DynIsland
             aiInput.TextChanged += delegate { AiSendState(); };
             aiInput.GotKeyboardFocus += delegate { aiBarBorder.BeginAnimation(SolidColorBrush.ColorProperty, CAnim(Theme.A(Theme.Current.Accent, 0.55), 200)); };
             aiInput.LostKeyboardFocus += delegate { aiBarBorder.BeginAnimation(SolidColorBrush.ColorProperty, CAnim(Theme.A(Theme.Current.Text, 0.06), 260)); };
-            Grid.SetColumn(send, 1);
+            Grid.SetColumn(field, 1); Grid.SetRow(field, 1); field.VerticalAlignment = VerticalAlignment.Center;
+            Grid.SetColumn(send, 2); Grid.SetRow(send, 1);
             bg.Children.Add(field); bg.Children.Add(send);
             bar.Child = bg;
             Grid.SetRow(bar, 3);
@@ -2213,7 +2230,7 @@ namespace DynIsland
             Grid.SetRowSpan(aiOverlay, 4);
             aiOverlay.MouseLeftButtonDown += (s, e) => { if (e.OriginalSource == aiOverlay) { e.Handled = true; AiCloseOverlay(); } };
             var panel = new Border { CornerRadius = new CornerRadius(14), Background = Theme.Surface, BorderBrush = Theme.Hairline, BorderThickness = new Thickness(1), HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(0, 60, 0, 0), Width = 250, MaxHeight = 290, Effect = new DropShadowEffect { BlurRadius = 18, ShadowDepth = 3, Opacity = 0.5 } };
-            var psv = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Hidden };
+            var psv = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Hidden }; ScrollFade.Attach(psv, 18, false);
             aiOverlayList = new StackPanel { Margin = new Thickness(6) };
             psv.Content = aiOverlayList; panel.Child = psv;
             aiOverlay.Children.Add(panel);
@@ -2307,16 +2324,153 @@ namespace DynIsland
         void AiRenderAll()
         {
             aiList.Children.Clear();
-            foreach (var m in Svc.Ai.Chat.Messages) aiList.Children.Add(m.Role == "user" ? UserBubble(m.Content) : AsstBubble(m.Content, m.Provider, m.Model, false));
+            foreach (var m in Svc.Ai.Chat.Messages) aiList.Children.Add(m.Role == "user" ? UserBubble(m.Content, m.Images) : AsstBubble(m.Content, m.Provider, m.Model, false));
             AiEmptyVisibility();
             ScrollAiEnd();
         }
 
-        // You: compact accent bubble on the right.
-        FrameworkElement UserBubble(string text)
+        // You: compact accent bubble on the right, any photos stacked above it like a message thread.
+        FrameworkElement UserBubble(string text, List<string> images)
         {
-            var tb = new TextBlock { Text = text, TextWrapping = TextWrapping.Wrap, FontSize = 13, Foreground = Theme.OnAccent, LineHeight = 19 };
-            return new Border { Child = tb, Padding = new Thickness(12, 7, 12, 8), MaxWidth = aiBig ? 470 : 300, Margin = new Thickness(48, 10, 0, 2), CornerRadius = new CornerRadius(16, 16, 4, 16), Background = Theme.AccentFill, HorizontalAlignment = HorizontalAlignment.Right };
+            var col = new StackPanel { HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(48, 10, 0, 2) };
+            var imgs = images == null ? new List<string>() : images.Where(File.Exists).ToList();
+            if (imgs.Count > 0)
+            {
+                var wrap = new WrapPanel { HorizontalAlignment = HorizontalAlignment.Right, FlowDirection = FlowDirection.LeftToRight, MaxWidth = aiBig ? 470 : 300 };
+                double side = imgs.Count == 1 ? (aiBig ? 220 : 170) : 92;
+                foreach (var f in imgs)
+                {
+                    var bmp = AiThumb(f, (int)(side * 2));
+                    if (bmp == null) continue;
+                    double w = side, h = side;
+                    // a single photo keeps its shape; several are square tiles
+                    if (imgs.Count == 1) { double ar = (double)bmp.PixelWidth / Math.Max(1, bmp.PixelHeight); if (ar >= 1) h = Math.Max(60, side / ar); else w = Math.Max(60, side * ar); }
+                    var tile = new Border { Width = w, Height = h, CornerRadius = new CornerRadius(14), Margin = new Thickness(4, 0, 0, 4), Cursor = Cursors.Hand, ToolTip = "Open photo",
+                        Background = new ImageBrush(bmp) { Stretch = Stretch.UniformToFill }, BorderBrush = Theme.Hairline, BorderThickness = new Thickness(1) };
+                    RenderOptions.SetBitmapScalingMode(tile, BitmapScalingMode.HighQuality);
+                    string path = f;
+                    K.Pressable(tile, () => { try { Process.Start(new ProcessStartInfo(path) { UseShellExecute = true }); } catch { } }, true);
+                    wrap.Children.Add(tile);
+                }
+                col.Children.Add(wrap);
+            }
+            if (!string.IsNullOrWhiteSpace(text) || imgs.Count == 0)
+            {
+                var tb = new TextBlock { Text = text, TextWrapping = TextWrapping.Wrap, FontSize = 13, Foreground = Theme.OnAccent, LineHeight = 19 };
+                col.Children.Add(new Border { Child = tb, Padding = new Thickness(12, 7, 12, 8), MaxWidth = aiBig ? 470 : 300, CornerRadius = new CornerRadius(16, 16, 4, 16), Background = Theme.AccentFill, HorizontalAlignment = HorizontalAlignment.Right });
+            }
+            return col;
+        }
+
+        static BitmapSource AiThumb(string file, int px)
+        {
+            try
+            {
+                var bi = new BitmapImage();
+                bi.BeginInit(); bi.CacheOption = BitmapCacheOption.OnLoad; bi.CreateOptions = BitmapCreateOptions.IgnoreColorProfile;
+                bi.DecodePixelWidth = px; bi.UriSource = new Uri(file); bi.EndInit(); bi.Freeze();
+                return bi;
+            }
+            catch { return null; }
+        }
+
+        // ---- photo attachments
+        void AiAddPending(IEnumerable<string> saved)
+        {
+            foreach (var f in saved)
+            {
+                if (f == null || aiPending.Count >= 6) continue;
+                aiPending.Add(f);
+                var bmp = AiThumb(f, 112);
+                var g = new Grid { Width = 52, Height = 52, Margin = new Thickness(0, 0, 6, 0), Tag = f };
+                var tile = new Border { CornerRadius = new CornerRadius(11), Margin = new Thickness(0, 4, 4, 0), BorderBrush = Theme.Hairline, BorderThickness = new Thickness(1),
+                    Background = bmp != null ? (Brush)new ImageBrush(bmp) { Stretch = Stretch.UniformToFill } : Theme.Hover };
+                RenderOptions.SetBitmapScalingMode(tile, BitmapScalingMode.HighQuality);
+                var x = new Border { Width = 18, Height = 18, CornerRadius = new CornerRadius(9), HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Top,
+                    Background = K.Solid(Color.FromArgb(235, 28, 28, 30)), BorderBrush = K.Solid(Color.FromArgb(90, 255, 255, 255)), BorderThickness = new Thickness(1),
+                    Cursor = Cursors.Hand, ToolTip = "Remove", Child = K.Glyph("", 7.5, Brushes.White) };
+                string path = f;
+                K.Pressable(x, () => AiRemovePending(path), true);
+                g.Children.Add(tile); g.Children.Add(x);
+                aiAttachStrip.Children.Add(g);
+                if (K.AnimScale > 0) K.PopIn(g, 0.6, 420);
+            }
+            aiAttachStrip.Visibility = aiPending.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+            AiSendState();
+            Pin();
+            Dispatcher.BeginInvoke(DispatcherPriority.Input, new Action(() => { aiInput.Focus(); Keyboard.Focus(aiInput); }));
+        }
+
+        void AiRemovePending(string f)
+        {
+            aiPending.Remove(f);
+            foreach (var g in aiAttachStrip.Children.OfType<FrameworkElement>().Where(c => (string)c.Tag == f).ToList()) aiAttachStrip.Children.Remove(g);
+            try { if (!Svc.Ai.Chat.Messages.Any(m => m.Images != null && m.Images.Contains(f))) File.Delete(f); } catch { }
+            aiAttachStrip.Visibility = aiPending.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+            AiSendState();
+        }
+
+        void AiClearPending()
+        {
+            aiPending.Clear(); aiAttachStrip.Children.Clear(); aiAttachStrip.Visibility = Visibility.Collapsed;
+        }
+
+        // Picture on the clipboard (copied image, screenshot, or copied image files) → attachment.
+        bool AiPasteImage()
+        {
+            try
+            {
+                if (Clipboard.ContainsFileDropList())
+                {
+                    var files = Clipboard.GetFileDropList().Cast<string>().Where(AiService.IsImageFile).ToList();
+                    if (files.Count == 0) return false;
+                    AiAttachFiles(files);
+                    return true;
+                }
+                if (!Clipboard.ContainsImage()) return false;
+                BitmapSource src = null; bool opaque = true;
+                // browsers / Snipping Tool also put a real PNG (with proper alpha) on the clipboard
+                var data = Clipboard.GetDataObject();
+                var png = data != null && data.GetDataPresent("PNG") ? data.GetData("PNG") as MemoryStream : null;
+                if (png != null)
+                {
+                    var dec = BitmapDecoder.Create(png, BitmapCreateOptions.PreservePixelFormat, BitmapCacheOption.OnLoad);
+                    src = dec.Frames[0]; opaque = false;
+                }
+                if (src == null) src = Clipboard.GetImage();
+                string saved = AiService.SaveImage(src, opaque);
+                if (saved == null) return false;
+                AiAddPending(new[] { saved });
+                return true;
+            }
+            catch (Exception ex) { Log.Write("ai paste image failed: " + ex.Message); return false; }
+        }
+
+        void AiAttachFiles(IEnumerable<string> files)
+        {
+            var saved = new List<string>();
+            foreach (var f in files.Where(AiService.IsImageFile).Take(6))
+            {
+                try { saved.Add(AiService.SaveImageFile(f)); }
+                catch (Exception ex) { Log.Write("ai attach " + f + " failed: " + ex.Message); }
+            }
+            if (saved.Count > 0) AiAddPending(saved);
+        }
+
+        void AiPickImages()
+        {
+            var dlg = new Microsoft.Win32.OpenFileDialog
+            {
+                Title = "Add photos", Multiselect = true,
+                Filter = "Images|*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.webp;*.tif;*.tiff;*.heic|All files|*.*",
+                InitialDirectory = Environment.GetFolderPath(Environment.SpecialFolder.MyPictures)
+            };
+            Pin();
+            aiPicking = true;
+            bool ok;
+            try { ok = dlg.ShowDialog(this) == true; }
+            finally { aiPicking = false; }
+            if (ok) AiAttachFiles(dlg.FileNames);
         }
 
         // Assistant: no bubble, full width, with a small provider header; copy appears on hover.
@@ -2404,7 +2558,7 @@ namespace DynIsland
         void AiSendState(bool busy)
         {
             if (aiSendBg == null) return;
-            bool lit = busy || aiInput.Text.Trim().Length > 0;
+            bool lit = busy || aiInput.Text.Trim().Length > 0 || aiPending.Count > 0;
             if (lit == aiSendLit) return;
             aiSendLit = lit;
             aiSendBg.BeginAnimation(SolidColorBrush.ColorProperty, CAnim(lit ? Theme.Current.Accent : Theme.Current.Hover, 180));
@@ -2434,17 +2588,19 @@ namespace DynIsland
         {
             if (Svc.Ai.Busy) { Svc.Ai.Cancel(); return; }
             string text = aiInput.Text.Trim();
-            if (text.Length == 0) return;
+            var images = aiPending.ToList();
+            if (text.Length == 0 && images.Count == 0) return;
             AiCloseOverlay();
+            AiClearPending();
             aiInput.Text = "";
-            var ub = UserBubble(text);
+            var ub = UserBubble(text, images);
             aiList.Children.Add(ub); K.FadeIn(ub, 12, 320);
             aiThinkingRow = ThinkingRow(S.AiProvider); aiList.Children.Add(aiThinkingRow); K.FadeIn(aiThinkingRow, 8, 260);
             aiStreamBubble = null; aiStreamText.Clear();
             aiSendGlyph.Text = ""; AiSendState(true);
             AiEmptyVisibility(); ScrollAiEnd();
             string prov = S.AiProvider, model = Svc.Ai.ModelFor(prov);
-            Svc.Ai.Send(text,
+            Svc.Ai.Send(text, images,
                 (type, t) =>
                 {
                     if (type == "thinking") return;
@@ -2514,6 +2670,7 @@ namespace DynIsland
 
         void AiNewChat()
         {
+            AiClearPending();
             Svc.Ai.NewChat();
             aiList.Children.Clear(); aiStreamBubble = null; aiThinkingRow = null;
             aiSendGlyph.Text = ""; AiSendState(false);
@@ -2691,7 +2848,7 @@ namespace DynIsland
             lInput.LostKeyboardFocus += delegate { lBoxRing.BeginAnimation(SolidColorBrush.ColorProperty, new ColorAnimation(Theme.A(Theme.Current.Accent, 0), TimeSpan.FromMilliseconds(Math.Max(1, K.Dur(200))))); lens.Foreground = Theme.Text2; };
             g.Children.Add(lBox);
 
-            lScroll = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Hidden, Margin = new Thickness(0, LGap, 0, 0) };
+            lScroll = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Hidden, Margin = new Thickness(0, LGap, 0, 0) }; ScrollFade.Attach(lScroll, 30, false);
             var stack = new StackPanel();
             // results sit over one highlight that glides between rows (instead of rows flipping colour)
             var resHost = new Grid();
@@ -2929,7 +3086,8 @@ namespace DynIsland
 
         Border AppTile(LaunchResult r)
         {
-            var sp = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+            // top-aligned: icons line up across a row whether the name takes one line or two
+            var sp = new StackPanel { VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(0, 10, 0, 0) };
             FrameworkElement icon = r.Icon != null ? (FrameworkElement)new Image { Source = r.Icon, Width = 34, Height = 34 } : K.Glyph("", 22, Theme.Text2);
             icon.HorizontalAlignment = HorizontalAlignment.Center;
             RenderOptions.SetBitmapScalingMode(icon, BitmapScalingMode.HighQuality);
@@ -3045,7 +3203,7 @@ namespace DynIsland
             Grid.SetRow(wOnlineBar, 1);
             g.Children.Add(wOnlineBar);
 
-            wScroll = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Hidden, Margin = new Thickness(0, 10, 0, 0) };
+            wScroll = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Hidden, Margin = new Thickness(0, 10, 0, 0) }; ScrollFade.Attach(wScroll, 30, false);
             wGrid = new WrapPanel();
             wScroll.Content = wGrid;
             wScroll.ScrollChanged += (s, e) =>

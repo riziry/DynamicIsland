@@ -66,7 +66,7 @@ namespace DynIsland
             gMenu = new UniformGrid { Rows = 1, Columns = 4, Margin = new Thickness(-4, 6, -4, 0), VerticalAlignment = VerticalAlignment.Top };
             gMenu.Children.Add(GameCard("blocks", "Blocks", "Stack & clear lines", BlocksArt()));
             gMenu.Children.Add(GameCard("sudoku", "Sudoku", "Fill every 3×3", SudokuArt()));
-            gMenu.Children.Add(GameCard("mines", "Mines", "Flag the hidden mines", MinesArt()));
+            gMenu.Children.Add(GameCard("mines", "Mines", "Flag every mine", MinesArt()));
             gMenu.Children.Add(GameCard("merge", "Merge", "Slide & double up", MergeArt()));
             Grid.SetRow(gMenu, 1);
             g.Children.Add(gMenu);
@@ -277,6 +277,8 @@ namespace DynIsland
 
         int[,] bBoard; Border[,] bCells; Border[,] bNextCells; Border bBoardHost;
         int bType, bRot, bX, bY, bNext, bScore, bLines, bLevel; bool bOver, bPaused;
+        bool bSwapped;      // the falling block was already traded with NEXT (once per block)
+        Grid bNextGrid;
         readonly List<int> bBag = new List<int>();
         DispatcherTimer bTimer;
         TextBlock bScoreText, bLinesText;
@@ -325,6 +327,10 @@ namespace DynIsland
                     Grid.SetRow(b, r); Grid.SetColumn(b, c); next.Children.Add(b); bNextCells[r, c] = b;
                 }
             side.Children.Add(next);
+            bNextGrid = next;
+            next.Background = Brushes.Transparent; next.Cursor = Cursors.Hand; next.ToolTip = "Swap with the falling block (C)";
+            next.MouseLeftButtonDown += (s, e) => e.Handled = true;
+            next.MouseLeftButtonUp += (s, e) => { e.Handled = true; BlocksKey(Key.C); };
             var sl = K.TB("SCORE", 9.5, Theme.Text3, FontWeights.Bold); sl.Margin = new Thickness(0, 12, 0, 0);
             side.Children.Add(sl);
             bScoreText = K.TB("0", 22, Theme.Text, FontWeights.Light); K.Tabular(bScoreText);
@@ -336,9 +342,10 @@ namespace DynIsland
             ctl.Children.Add(SmallBtn("", "Rotate (↑)", () => BlocksKey(Key.Up)));
             ctl.Children.Add(SmallBtn("", "Right (→)", () => BlocksKey(Key.Right)));
             ctl.Children.Add(SmallBtn("", "Drop (Space)", () => BlocksKey(Key.Space)));
+            ctl.Children.Add(SmallBtn("\uE8AB", "Swap with next (C)", () => BlocksKey(Key.C)));
             ctl.Children.Add(SmallBtn("", "Pause (P)", () => BlocksKey(Key.P)));
             side.Children.Add(ctl);
-            var hint = K.TB("← → move · ↑ rotate\n↓ soft drop · Space hard drop\nP pause · Esc back", 9.5, Theme.Text3, FontWeights.Normal);
+            var hint = K.TB("← → move · ↑ rotate\n↓ soft drop · Space hard drop\nC swap with next · P pause", 9.5, Theme.Text3, FontWeights.Normal);
             hint.TextTrimming = TextTrimming.None; hint.Margin = new Thickness(0, 10, 0, 0); hint.LineHeight = 14;
             side.Children.Add(hint);
             Grid.SetColumn(side, 1);
@@ -379,9 +386,23 @@ namespace DynIsland
 
         void BSpawn()
         {
-            bType = bNext; bNext = BTake();
-            bRot = 0; bX = bType == 2 ? 4 : 3; bY = bType == 1 ? -1 : 0;
+            bType = bNext; bNext = BTake(); bSwapped = false;
+            bRot = 0; bX = BSpawnX(bType); bY = BSpawnY(bType);
             if (!BFits(bType, bRot, bX, bY)) BGameOver();
+        }
+
+        static int BSpawnX(int type) { return type == 2 ? 4 : 3; }
+        static int BSpawnY(int type) { return type == 1 ? -1 : 0; }
+
+        // Trade the falling block for NEXT; the incoming one starts again from the top. Once per block.
+        void BSwap()
+        {
+            if (bSwapped) return;
+            int t = bNext;
+            if (!BFits(t, 0, BSpawnX(t), BSpawnY(t))) return;
+            bNext = bType; bType = t;
+            bRot = 0; bX = BSpawnX(t); bY = BSpawnY(t);
+            bSwapped = true;
         }
 
         void BlocksTick()
@@ -463,6 +484,7 @@ namespace DynIsland
                 case Key.Space:
                     while (BFits(bType, bRot, bX, bY + 1)) { bY++; bScore += 2; }
                     BLock(); break;
+                case Key.C: case Key.LeftShift: case Key.RightShift: BSwap(); break;
                 default: return false;
             }
             BRender();
@@ -500,6 +522,7 @@ namespace DynIsland
                 }
             for (int r = 0; r < 4; r++) for (int c = 0; c < 4; c++) bNextCells[r, c].Background = Brushes.Transparent;
             foreach (var p in BCellsOf(bNext, 0)) bNextCells[(int)p.Y, (int)p.X].Background = K.Solid(BColors[bNext]);
+            if (bNextGrid != null) bNextGrid.Opacity = bSwapped && !bOver ? 0.4 : 1;   // dimmed: swap used for this block
             bScoreText.Text = bScore.ToString("N0", K.EN);
             bLinesText.Text = bLines + " lines · level " + bLevel;
             gStat1.Text = "Level " + bLevel;

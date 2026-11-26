@@ -11,6 +11,7 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 
 namespace DynIsland
@@ -23,6 +24,10 @@ namespace DynIsland
         public string Model = "";
         public string Method = "";
         public List<Dictionary<string, object>> Blocks;   // Claude API content blocks (replayed unchanged)
+        public List<string> Images;                       // attached photos (files in AiService.ImgDir)
+
+        public bool HasImages { get { return Images != null && Images.Any(File.Exists); } }
+        public List<string> LiveImages() { return Images == null ? new List<string>() : Images.Where(File.Exists).ToList(); }
     }
 
     public class AiConversation
@@ -77,6 +82,7 @@ namespace DynIsland
             if (Chat.Messages == null) Chat.Messages = new List<AiMessage>();
             if (Chat.Sessions == null) Chat.Sessions = new Dictionary<string, string>();
             foreach (var p in Providers) status[p] = new AiStatus { Key = KeyFor(p).Length > 0 };
+            CleanImages(null);
             RefreshStatus(null);
         }
 
@@ -86,7 +92,71 @@ namespace DynIsland
             Store.WriteFile(ChatPath, Store.Js().Serialize(Chat));
         }
 
-        public void NewChat() { Cancel(); Chat = new AiConversation(); SaveChat(); }
+        public void NewChat() { Cancel(); Chat = new AiConversation(); SaveChat(); CleanImages(null); }
+
+        // ------------------------------------------------------------- photos
+        public static readonly string ImgDir = Path.Combine(Store.Dir, "ai-images");
+        const int MaxImageEdge = 1600;   // big enough to read text in screenshots, small enough for every API
+
+        /// Normalises any picture (pasted, imported, dropped) into a PNG/JPEG in ImgDir, downscaled so the
+        /// long edge is at most MaxImageEdge. Returns the file path, or null if it isn't a usable image.
+        public static string SaveImage(BitmapSource src, bool opaque)
+        {
+            if (src == null || src.PixelWidth < 1 || src.PixelHeight < 1) return null;
+            BitmapSource b = src;
+            double sc = Math.Min(1.0, (double)MaxImageEdge / Math.Max(b.PixelWidth, b.PixelHeight));
+            if (sc < 1) b = new TransformedBitmap(b, new ScaleTransform(sc, sc));
+            // clipboard DIBs often carry a garbage (all-zero) alpha channel: drop it
+            if (opaque || b.Format == PixelFormats.Bgr32 || b.Format == PixelFormats.Bgr24) b = new FormatConvertedBitmap(b, PixelFormats.Bgr32, null, 0);
+            Directory.CreateDirectory(ImgDir);
+            string id = DateTime.Now.ToString("yyyyMMdd-HHmmss") + "-" + Guid.NewGuid().ToString("N").Substring(0, 6);
+            byte[] png;
+            using (var ms = new MemoryStream()) { var e = new PngBitmapEncoder(); e.Frames.Add(BitmapFrame.Create(b)); e.Save(ms); png = ms.ToArray(); }
+            string path;
+            // photos compress far better as JPEG; keep PNG for screenshots / transparency
+            if (png.Length > 1500000)
+            {
+                var flat = new FormatConvertedBitmap(b, PixelFormats.Bgr32, null, 0);
+                using (var ms = new MemoryStream()) { var e = new JpegBitmapEncoder { QualityLevel = 88 }; e.Frames.Add(BitmapFrame.Create(flat)); e.Save(ms); path = Path.Combine(ImgDir, id + ".jpg"); File.WriteAllBytes(path, ms.ToArray()); }
+            }
+            else { path = Path.Combine(ImgDir, id + ".png"); File.WriteAllBytes(path, png); }
+            return path;
+        }
+
+        public static string SaveImageFile(string file)
+        {
+            var bi = new BitmapImage();
+            bi.BeginInit(); bi.CacheOption = BitmapCacheOption.OnLoad; bi.CreateOptions = BitmapCreateOptions.IgnoreColorProfile;
+            bi.UriSource = new Uri(file); bi.EndInit(); bi.Freeze();
+            return SaveImage(bi, false);
+        }
+
+        public static readonly string[] ImageExts = { ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff", ".heic" };
+        public static bool IsImageFile(string f) { return ImageExts.Contains((Path.GetExtension(f) ?? "").ToLowerInvariant()); }
+
+        static string Mime(string path) { return path.EndsWith(".jpg", StringComparison.OrdinalIgnoreCase) ? "image/jpeg" : "image/png"; }
+        static string B64(string path) { return Convert.ToBase64String(File.ReadAllBytes(path)); }
+
+        /// Deletes photos no message (and nothing in keep) refers to.
+        public void CleanImages(IEnumerable<string> keep)
+        {
+            try
+            {
+                if (!Directory.Exists(ImgDir)) return;
+                var used = new HashSet<string>(Chat.Messages.Where(m => m.Images != null).SelectMany(m => m.Images), StringComparer.OrdinalIgnoreCase);
+                if (keep != null) foreach (var k in keep) used.Add(k);
+                foreach (var f in Directory.GetFiles(ImgDir)) if (!used.Contains(f)) { try { File.Delete(f); } catch { } }
+            }
+            catch { }
+        }
+
+        // Images are only re-sent for the most recent user turns, to keep requests small.
+        static HashSet<AiMessage> ImageTurns(List<AiMessage> history)
+        {
+            return new HashSet<AiMessage>(history.Where(m => m.Role == "user" && m.HasImages).Reverse().Take(4));
+        }
+        static string TextOr(AiMessage m, string fallback) { return string.IsNullOrWhiteSpace(m.Content) ? fallback : m.Content; }
+        const string ImageOnlyPrompt = "What's in this image?";
 
         // ------------------------------------------------------------- status
         public AiStatus GetStatus(string p)
@@ -472,12 +542,12 @@ namespace DynIsland
 
         /// Sends a user message. Callbacks run on the UI thread.
         /// onEvent("thinking"|"delta", text); onDone(error or null, action: "", "login", "key", "update").
-        public void Send(string text, Action<string, string> onEvent, Action<string, string> onDone)
+        public void Send(string text, List<string> images, Action<string, string> onEvent, Action<string, string> onDone)
         {
             if (Busy) return;
             string p = Store.S.AiProvider, method = MethodFor(p), model = ModelFor(p);
             Busy = true; cancelled = false;
-            var user = new AiMessage { Role = "user", Content = text, Provider = p, Model = model, Method = method };
+            var user = new AiMessage { Role = "user", Content = text, Provider = p, Model = model, Method = method, Images = images != null && images.Count > 0 ? new List<string>(images) : null };
             Chat.Messages.Add(user);
             var history = Chat.Messages.ToList();
             string session;
@@ -578,12 +648,24 @@ namespace DynIsland
         static readonly HashSet<string> FallbackModels = new HashSet<string> { "claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1", "claude-opus-5" };
         static readonly HashSet<string> EffortModels = new HashSet<string> { "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1", "claude-fable-5", "claude-opus-5", "claude-sonnet-5", "claude-opus-4-8", "claude-opus-4-7" };
 
+        // Anthropic-style content: image blocks first, then the text (the shape the CLI's stream-json takes too).
+        static object ClaudeUserContent(AiMessage m, bool images)
+        {
+            if (!images || !m.HasImages) return m.Images != null ? TextOr(m, "[image]") : m.Content;
+            var list = new List<object>();
+            foreach (var f in m.LiveImages())
+                list.Add(new Dictionary<string, object> { { "type", "image" }, { "source", new Dictionary<string, object> { { "type", "base64" }, { "media_type", Mime(f) }, { "data", B64(f) } } } });
+            if (!string.IsNullOrWhiteSpace(m.Content)) list.Add(new Dictionary<string, object> { { "type", "text" }, { "text", m.Content } });
+            return list;
+        }
+
         List<Dictionary<string, object>> ChatClaudeKey(string key, string model, string sys, List<AiMessage> history, Action<string> delta, Action thinking, ref string err, ref string action)
         {
+            var withImg = ImageTurns(history);
             var msgs = history.Select(m => (object)new Dictionary<string, object>
             {
                 { "role", m.Role },
-                { "content", m.Role == "assistant" && m.Blocks != null && m.Provider == "claude" && m.Model == model ? (object)m.Blocks : m.Content }
+                { "content", m.Role == "assistant" && m.Blocks != null && m.Provider == "claude" && m.Model == model ? (object)m.Blocks : ClaudeUserContent(m, withImg.Contains(m)) }
             }).ToList();
             bool fb = FallbackModels.Contains(model);
             var body = new Dictionary<string, object> { { "model", model }, { "max_tokens", 16000 }, { "stream", true }, { "system", sys }, { "messages", msgs } };
@@ -629,7 +711,20 @@ namespace DynIsland
         void ChatGptKey(string key, string model, string sys, List<AiMessage> history, Action<string> delta, ref string err, ref string action)
         {
             var msgs = new List<object> { new Dictionary<string, object> { { "role", "system" }, { "content", sys } } };
-            msgs.AddRange(history.Select(m => (object)new Dictionary<string, object> { { "role", m.Role }, { "content", m.Content } }));
+            var withImg = ImageTurns(history);
+            msgs.AddRange(history.Select(m =>
+            {
+                object content = m.Images != null ? TextOr(m, "[image]") : m.Content;
+                if (withImg.Contains(m))
+                {
+                    var parts = new List<object>();
+                    if (!string.IsNullOrWhiteSpace(m.Content)) parts.Add(new Dictionary<string, object> { { "type", "text" }, { "text", m.Content } });
+                    foreach (var f in m.LiveImages())
+                        parts.Add(new Dictionary<string, object> { { "type", "image_url" }, { "image_url", new Dictionary<string, object> { { "url", "data:" + Mime(f) + ";base64," + B64(f) } } } });
+                    content = parts;
+                }
+                return (object)new Dictionary<string, object> { { "role", m.Role }, { "content", content } };
+            }));
             var body = new Dictionary<string, object> { { "model", model }, { "stream", true }, { "messages", msgs } };
             try
             {
@@ -648,12 +743,24 @@ namespace DynIsland
             catch (WebException e) { if (!cancelled) { int code; err = HttpError(e, out code); if (code == 401 || code == 403) action = "key"; } }
         }
 
+        static object[] GeminiParts(AiMessage m, bool images)
+        {
+            var parts = new List<object>();
+            if (images)
+                foreach (var f in m.LiveImages())
+                    parts.Add(new Dictionary<string, object> { { "inline_data", new Dictionary<string, object> { { "mime_type", Mime(f) }, { "data", B64(f) } } } });
+            string t = m.Images != null ? (images && m.HasImages ? m.Content : TextOr(m, "[image]")) : m.Content;
+            if (!string.IsNullOrWhiteSpace(t) || parts.Count == 0) parts.Add(new Dictionary<string, object> { { "text", t ?? "" } });
+            return parts.ToArray();
+        }
+
         void ChatGeminiKey(string key, string model, string sys, List<AiMessage> history, Action<string> delta, Action thinking, ref string err, ref string action)
         {
+            var withImg = ImageTurns(history);
             var body = new Dictionary<string, object>
             {
                 { "systemInstruction", new Dictionary<string, object> { { "parts", new object[] { new Dictionary<string, object> { { "text", sys } } } } } },
-                { "contents", history.Select(m => (object)new Dictionary<string, object> { { "role", m.Role == "assistant" ? "model" : "user" }, { "parts", new object[] { new Dictionary<string, object> { { "text", m.Content } } } } }).ToList() }
+                { "contents", history.Select(m => (object)new Dictionary<string, object> { { "role", m.Role == "assistant" ? "model" : "user" }, { "parts", GeminiParts(m, withImg.Contains(m)) } }).ToList() }
             };
             string url = "https://generativelanguage.googleapis.com/v1beta/models/" + Uri.EscapeDataString(model) + ":streamGenerateContent?alt=sse";
             try
@@ -698,11 +805,12 @@ namespace DynIsland
         // ---- CLI (browser sign-in)
         static string TranscriptPrompt(List<AiMessage> msgs, string session)
         {
-            string last = msgs[msgs.Count - 1].Content;
+            var lastMsg = msgs[msgs.Count - 1];
+            string last = lastMsg.HasImages ? TextOr(lastMsg, ImageOnlyPrompt) : lastMsg.Content;
             if (!string.IsNullOrEmpty(session) || msgs.Count == 1) return last;
             var sb = new StringBuilder("Conversation so far:");
             foreach (var m in msgs.Take(msgs.Count - 1).Skip(Math.Max(0, msgs.Count - 21)))
-                sb.Append("\n\n[" + (m.Role == "user" ? "User" : "Assistant") + "]\n" + m.Content);
+                sb.Append("\n\n[" + (m.Role == "user" ? "User" : "Assistant") + "]\n" + (m.Images != null ? "[image attached] " : "") + m.Content);
             sb.Append("\n---\nReply to the user's latest message:\n" + last);
             string s = sb.ToString();
             return s.Length > 24000 ? s.Substring(s.Length - 24000) : s;
@@ -713,11 +821,22 @@ namespace DynIsland
             string exe = Which(p);
             if (exe == null) { err = "The " + CliName(p) + " CLI isn't installed."; action = "login"; return; }
             string prompt = TranscriptPrompt(msgs, session);
+            var images = msgs[msgs.Count - 1].LiveImages();
             var args = new List<string>();
             bool stdinPrompt = false;
             if (p == "claude")
             {
                 args.AddRange(new[] { "-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--tools", "", "--strict-mcp-config", "--setting-sources", "", "--system-prompt", sys });
+                // photos go in as base64 image blocks of a stream-json user message
+                if (images.Count > 0)
+                {
+                    args.AddRange(new[] { "--input-format", "stream-json" });
+                    var content = new List<object>();
+                    foreach (var f in images)
+                        content.Add(new Dictionary<string, object> { { "type", "image" }, { "source", new Dictionary<string, object> { { "type", "base64" }, { "media_type", Mime(f) }, { "data", B64(f) } } } });
+                    content.Add(new Dictionary<string, object> { { "type", "text" }, { "text", prompt } });
+                    prompt = Store.Js().Serialize(new Dictionary<string, object> { { "type", "user" }, { "message", new Dictionary<string, object> { { "role", "user" }, { "content", content } } } }) + "\n";
+                }
                 if (!string.IsNullOrEmpty(model)) { args.Add("--model"); args.Add(model); }
                 if (!string.IsNullOrEmpty(session)) { args.Add("--resume"); args.Add(session); }
                 stdinPrompt = true;
@@ -729,10 +848,18 @@ namespace DynIsland
                 args.Add("exec");
                 if (!string.IsNullOrEmpty(session)) { args.Add("resume"); args.AddRange(common); args.Add(session); }
                 else args.AddRange(common);
+                foreach (var f in images) { args.Add("--image"); args.Add(f); }
+                args.Add("--");   // --image takes several values: end them before the prompt
                 args.Add(prompt);
             }
             else
             {
+                // Antigravity's print mode only takes text: point its file tools at the saved photos
+                if (images.Count > 0)
+                {
+                    prompt += "\n\nAttached image" + (images.Count > 1 ? "s" : "") + " (open with your file viewing tool before answering):\n" + string.Join("\n", images);
+                    args.AddRange(new[] { "--add-dir", ImgDir });
+                }
                 args.AddRange(new[] { "-p", prompt, "--output-format", "stream-json" });
                 if (!string.IsNullOrEmpty(model)) { args.Add("--model"); args.Add(model); }
                 if (!string.IsNullOrEmpty(session)) { args.Add("--conversation"); args.Add(session); }
